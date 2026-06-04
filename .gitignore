@@ -1,0 +1,24 @@
+# API keys and secrets — never commit these
+*.key
+*.secret
+gemini-key.txt
+config.json
+
+# Keep the example config
+!gemini_config.example.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# History files
+history.json
+*.history.json
+
+# Logs
+*.log
