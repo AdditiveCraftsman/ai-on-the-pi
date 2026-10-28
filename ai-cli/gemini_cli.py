@@ -396,7 +396,7 @@ examples:
             print("No history file found.")
         return
 
-    if not args.chat and not args.question:
+    if not args.chat and not args.question and not args.models:
         parser.print_help()
         sys.exit(1)
 
