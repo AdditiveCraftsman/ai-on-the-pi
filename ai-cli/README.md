@@ -146,10 +146,10 @@ The config file at `~/.config/gemini-cli/config.json` controls five things:
 
 ```json
 {
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.1-flash-lite",
   "history_file": "~/.local/share/gemini-cli/history.json",
   "max_history_messages": 40,
-  "fallback_model": "gemini-3.1-flash-lite",
+  "fallback_model": "gemini-2.5-flash",
   "system_prompt": "Your instructions here..."
 }
 ```

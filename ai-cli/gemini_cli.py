@@ -35,7 +35,7 @@ KEY_FILE     = Path.home() / "gemini-key.txt"
 
 # ── Default config (written on first run) ───────────────────
 DEFAULT_CONFIG = {
-    "model": "gemini-2.5-flash",
+    "model": "gemini-3.1-flash-lite",
     "system_prompt": (
         "You are a helpful Raspberry Pi and Linux assistant. "
         "Keep answers concise and practical. "
@@ -47,7 +47,7 @@ DEFAULT_CONFIG = {
     "max_history_messages": 40,
     # If the main model is overloaded, times out or is retired (404), the CLI
     # automatically tries this one instead. "" disables the fallback.
-    "fallback_model": "gemini-3.1-flash-lite"
+    "fallback_model": "gemini-2.5-flash"
 }
 
 # GEMINI_API_BASE can be overridden (used for testing against a local server).
