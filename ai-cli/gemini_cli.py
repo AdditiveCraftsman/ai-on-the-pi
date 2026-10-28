@@ -44,14 +44,17 @@ DEFAULT_CONFIG = {
     "history_file": str(HISTORY_FILE),
     # Only the most recent N messages are sent to the API (keeps requests fast
     # and cheap when using --continue). 0 = send everything.
-    "max_history_messages": 40
+    "max_history_messages": 40,
+    # If the main model is overloaded, times out or is retired (404), the CLI
+    # automatically tries this one instead. "" disables the fallback.
+    "fallback_model": "gemini-3.1-flash-lite"
 }
 
 # GEMINI_API_BASE can be overridden (used for testing against a local server).
 API_BASE = os.environ.get(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 )
-TIMEOUT_SEC = 90
+TIMEOUT_SEC = 60
 RETRY_CODES = {429, 500, 502, 503, 504}
 RETRY_DELAYS = [2, 5, 10]   # seconds between attempts
 
@@ -172,20 +175,29 @@ class Spinner:
 
 # ── API call ─────────────────────────────────────────────────
 class ApiError(Exception):
-    """A failed API call. Raised (not exited) so chat mode can survive it."""
+    """A failed API call. Raised (not exited) so chat mode can survive it.
 
-def _retry_notice(what, attempt):
-    warn(f"{what}; retrying in {RETRY_DELAYS[attempt]}s "
-         f"({attempt + 1}/{len(RETRY_DELAYS)})")
+    fallbackable is True for problems another model might not have:
+    overload/rate limits, server errors, timeouts, and retired models.
+    """
+    def __init__(self, msg, fallbackable=False, short=""):
+        super().__init__(msg)
+        self.fallbackable = fallbackable
+        self.short = short
 
-def _request(url, api_key, payload=None):
+def _retry_notice(what, attempt, delays):
+    warn(f"{what}; retrying in {delays[attempt]}s ({attempt + 1}/{len(delays)})")
+
+def _request(url, api_key, payload=None, max_retries=None):
     """One HTTP call with retries on rate limits / transient server errors."""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"x-goog-api-key": api_key}   # key in a header, not the URL
     if data is not None:
         headers["Content-Type"] = "application/json"
 
-    for attempt in range(len(RETRY_DELAYS) + 1):
+    delays = RETRY_DELAYS if max_retries is None else RETRY_DELAYS[:max_retries]
+
+    for attempt in range(len(delays) + 1):
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
@@ -196,24 +208,45 @@ def _request(url, api_key, payload=None):
                 msg = json.loads(body).get("error", {}).get("message", body)
             except Exception:
                 msg = body
-            if e.code in RETRY_CODES and attempt < len(RETRY_DELAYS):
-                _retry_notice(f"HTTP {e.code}", attempt)
-                time.sleep(RETRY_DELAYS[attempt])
+            if e.code in RETRY_CODES and attempt < len(delays):
+                _retry_notice(f"HTTP {e.code}", attempt, delays)
+                time.sleep(delays[attempt])
                 continue
             hint = ""
             if e.code == 404:
                 hint = ("\n  The model may have been retired or renamed. "
                         "Run:  gemini_cli.py --models")
-            raise ApiError(f"API error ({e.code}): {msg}{hint}")
+            raise ApiError(f"API error ({e.code}): {msg}{hint}",
+                           fallbackable=(e.code in RETRY_CODES or e.code == 404),
+                           short=f"HTTP {e.code}")
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             reason = getattr(e, "reason", e)
-            if attempt < len(RETRY_DELAYS):
-                _retry_notice(f"network error ({reason})", attempt)
-                time.sleep(RETRY_DELAYS[attempt])
+            if attempt < len(delays):
+                _retry_notice(f"network error ({reason})", attempt, delays)
+                time.sleep(delays[attempt])
                 continue
-            raise ApiError(f"Network error: {reason}")
+            raise ApiError(f"Network error: {reason}",
+                           fallbackable=True, short="network/timeout")
 
-def call_api(model, api_key, contents, system_prompt=None):
+def call_api(model, api_key, contents, system_prompt=None, fallback=None):
+    """Ask `model`; if it fails in a way another model might not, try `fallback`.
+
+    With a fallback configured the main model gets only one quick retry, so an
+    overloaded model costs ~2 s instead of ~17 s before the switch.
+    """
+    use_fallback = bool(fallback) and fallback != model
+    try:
+        return _generate(model, api_key, contents, system_prompt,
+                         max_retries=1 if use_fallback else None)
+    except ApiError as e:
+        if not (use_fallback and e.fallbackable):
+            raise
+        warn(f"{model} failed ({e.short}); trying fallback model {fallback}")
+        if e.short == "HTTP 404":
+            warn(f"'{model}' may be retired; run --models and update 'model' in your config")
+        return _generate(fallback, api_key, contents, system_prompt)
+
+def _generate(model, api_key, contents, system_prompt, max_retries=None):
     url     = f"{API_BASE}/models/{model}:generateContent"
     payload = {"contents": contents}
     if system_prompt:
@@ -222,7 +255,7 @@ def call_api(model, api_key, contents, system_prompt=None):
         }
 
     with Spinner():
-        result = _request(url, api_key, payload)
+        result = _request(url, api_key, payload, max_retries)
 
     block = result.get("promptFeedback", {}).get("blockReason")
     if block:
@@ -261,7 +294,7 @@ def single_question(question, cfg, api_key, history, save, hist_file):
     try:
         response = call_api(cfg["model"], api_key,
                             trim_history(history, cfg.get("max_history_messages")),
-                            cfg.get("system_prompt"))
+                            cfg.get("system_prompt"), cfg.get("fallback_model"))
     except ApiError as e:
         err(str(e))
         sys.exit(1)
@@ -318,7 +351,7 @@ def chat_mode(cfg, api_key, history, save, hist_file):
         try:
             response = call_api(cfg["model"], api_key,
                                 trim_history(history, cfg.get("max_history_messages")),
-                                cfg.get("system_prompt"))
+                                cfg.get("system_prompt"), cfg.get("fallback_model"))
         except ApiError as e:
             err(str(e))
             history.pop()   # drop the unanswered question; the session continues
@@ -390,6 +423,7 @@ examples:
     cfg  = load_config()
     if args.model:
         cfg["model"] = args.model
+        cfg["fallback_model"] = ""   # -m means "exactly this model": no fallback
     hist_file = cfg.get("history_file", str(HISTORY_FILE))
 
     # ── Info commands (no API needed) ────────────────────────
@@ -397,6 +431,7 @@ examples:
         print(f"Config file   : {CONFIG_FILE}")
         print(f"History file  : {hist_file}")
         print(f"Model         : {cfg['model']}")
+        print(f"Fallback model: {cfg.get('fallback_model') or '(none)'}")
         print(f"History limit : {cfg.get('max_history_messages')} messages")
         print(f"System prompt :\n  {cfg.get('system_prompt', '(none)')}")
         return

@@ -142,18 +142,21 @@ llm models           # list all available models
 
 ## The system prompt — `config.json`
 
-The config file at `~/.config/gemini-cli/config.json` controls four things:
+The config file at `~/.config/gemini-cli/config.json` controls five things:
 
 ```json
 {
   "model": "gemini-2.5-flash",
   "history_file": "~/.local/share/gemini-cli/history.json",
   "max_history_messages": 40,
+  "fallback_model": "gemini-3.1-flash-lite",
   "system_prompt": "Your instructions here..."
 }
 ```
 
 **`model`** — which Gemini model to use. Google retires and renames models regularly, so run `ai --models` to see what your key can use today, then copy a name into this setting. Generally, "flash" models are the fast, cheap default, "flash-lite" models are faster still with higher free-tier limits, and "pro" models are the most capable with tighter limits. If a model is retired you will get a 404 error that points you back to `ai --models`.
+
+**`fallback_model`** — a second model to try automatically when the main one is overloaded (503/429), times out, or has been retired (404). The main model gets one quick retry, then the CLI switches, so an overloaded model costs about 2 seconds instead of waiting through every retry. Set it to `""` to turn this off. Using `-m MODEL` on the command line always means exactly that model, with no fallback, which is handy for comparing models.
 
 **`max_history_messages`** — how many of the most recent messages are sent to the API when you use `--continue` or `--chat` (default 40; `0` sends everything). Older turns stay in your history file but are not sent, which keeps replies fast and cheap.
 
@@ -161,7 +164,7 @@ The config file at `~/.config/gemini-cli/config.json` controls four things:
 
 **`history_file`** — where conversation history is saved when using `--save`.
 
-Network hiccups and free-tier rate limits (HTTP 429/503) are retried automatically, and a failed request in `--chat` no longer ends your session.
+Network hiccups and free-tier rate limits (HTTP 429/503) are retried automatically (each retry is announced on screen), requests time out after 60 seconds, and a failed request in `--chat` no longer ends your session.
 
 > Each Pi in a multi-Pi setup can have its own `config.json` with a different system prompt tailored to that Pi's role (e.g. an OctoPrint Pi's prompt could include printer model, G-code notes, common issues).
 
