@@ -174,6 +174,10 @@ class Spinner:
 class ApiError(Exception):
     """A failed API call. Raised (not exited) so chat mode can survive it."""
 
+def _retry_notice(what, attempt):
+    warn(f"{what}; retrying in {RETRY_DELAYS[attempt]}s "
+         f"({attempt + 1}/{len(RETRY_DELAYS)})")
+
 def _request(url, api_key, payload=None):
     """One HTTP call with retries on rate limits / transient server errors."""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -193,6 +197,7 @@ def _request(url, api_key, payload=None):
             except Exception:
                 msg = body
             if e.code in RETRY_CODES and attempt < len(RETRY_DELAYS):
+                _retry_notice(f"HTTP {e.code}", attempt)
                 time.sleep(RETRY_DELAYS[attempt])
                 continue
             hint = ""
@@ -203,6 +208,7 @@ def _request(url, api_key, payload=None):
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             reason = getattr(e, "reason", e)
             if attempt < len(RETRY_DELAYS):
+                _retry_notice(f"network error ({reason})", attempt)
                 time.sleep(RETRY_DELAYS[attempt])
                 continue
             raise ApiError(f"Network error: {reason}")
