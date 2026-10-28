@@ -11,6 +11,7 @@ Usage:
   Load history + ask:          gemini_cli.py "question" --continue
   Load history + chat:         gemini_cli.py --chat --continue
   List usable models:          gemini_cli.py --models
+  Try a model for one run:     gemini_cli.py -m MODEL "your question"
   Show config:                 gemini_cli.py --config
   Clear saved history:         gemini_cli.py --clear-history
 """
@@ -340,6 +341,7 @@ examples:
   gemini_cli.py "question" --continue           load history, then ask
   gemini_cli.py --chat --continue --save        full persistent session
   gemini_cli.py --models                         list models your key can use
+  gemini_cli.py -m gemini-flash-latest "question"   try another model once
   gemini_cli.py --config                         show config path + values
   gemini_cli.py --clear-history                  delete saved history
         """
@@ -362,6 +364,10 @@ examples:
         help="Load saved history before asking / chatting"
     )
     parser.add_argument(
+        "-m", "--model", metavar="NAME",
+        help="Use this model for this run (overrides config), e.g. -m gemini-flash-latest"
+    )
+    parser.add_argument(
         "--models", action="store_true",
         help="List the models your API key can use (to pick or update 'model')"
     )
@@ -376,6 +382,8 @@ examples:
 
     args = parser.parse_args()
     cfg  = load_config()
+    if args.model:
+        cfg["model"] = args.model
     hist_file = cfg.get("history_file", str(HISTORY_FILE))
 
     # ── Info commands (no API needed) ────────────────────────

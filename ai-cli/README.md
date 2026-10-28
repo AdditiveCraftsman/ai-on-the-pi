@@ -132,6 +132,7 @@ aic --continue --save
 
 ```bash
 ai --models          # list the models your API key can use right now
+ai -m MODEL "question"   # try a different model for one run without editing config
 ai --config          # show config file path and current settings
 ai --clear-history   # delete saved history file
 llm models           # list all available models
