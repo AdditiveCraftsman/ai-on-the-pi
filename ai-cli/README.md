@@ -131,6 +131,7 @@ aic --continue --save
 ### Other commands
 
 ```bash
+ai --models          # list the models your API key can use right now
 ai --config          # show config file path and current settings
 ai --clear-history   # delete saved history file
 llm models           # list all available models
@@ -140,24 +141,26 @@ llm models           # list all available models
 
 ## The system prompt — `config.json`
 
-The config file at `~/.config/gemini-cli/config.json` controls three things:
+The config file at `~/.config/gemini-cli/config.json` controls four things:
 
 ```json
 {
   "model": "gemini-2.5-flash",
   "history_file": "~/.local/share/gemini-cli/history.json",
+  "max_history_messages": 40,
   "system_prompt": "Your instructions here..."
 }
 ```
 
-**`model`** — which Gemini model to use. Options include:
-- `gemini-2.5-flash` — default, best balance of speed and quality
-- `gemini-2.5-flash-lite` — faster, higher free tier limit (1000 req/day)
-- `gemini-2.5-pro` — most capable, lower free tier limit
+**`model`** — which Gemini model to use. Google retires and renames models regularly, so run `ai --models` to see what your key can use today, then copy a name into this setting. Generally, "flash" models are the fast, cheap default, "flash-lite" models are faster still with higher free-tier limits, and "pro" models are the most capable with tighter limits. If a model is retired you will get a 404 error that points you back to `ai --models`.
+
+**`max_history_messages`** — how many of the most recent messages are sent to the API when you use `--continue` or `--chat` (default 40; `0` sends everything). Older turns stay in your history file but are not sent, which keeps replies fast and cheap.
 
 **`system_prompt`** — what the AI knows about you and your setup. This is where the assistant gets context-aware. See `gemini_config.example.json` for a starting template.
 
 **`history_file`** — where conversation history is saved when using `--save`.
+
+Network hiccups and free-tier rate limits (HTTP 429/503) are retried automatically, and a failed request in `--chat` no longer ends your session.
 
 > Each Pi in a multi-Pi setup can have its own `config.json` with a different system prompt tailored to that Pi's role (e.g. an OctoPrint Pi's prompt could include printer model, G-code notes, common issues).
 

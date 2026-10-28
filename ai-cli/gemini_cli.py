@@ -10,6 +10,7 @@ Usage:
   Interactive + save history:  gemini_cli.py --chat --save
   Load history + ask:          gemini_cli.py "question" --continue
   Load history + chat:         gemini_cli.py --chat --continue
+  List usable models:          gemini_cli.py --models
   Show config:                 gemini_cli.py --config
   Clear saved history:         gemini_cli.py --clear-history
 """
@@ -39,13 +40,19 @@ DEFAULT_CONFIG = {
         "Keep answers concise and practical. "
         "Prefer short commands over long explanations."
     ),
-    "history_file": str(HISTORY_FILE)
+    "history_file": str(HISTORY_FILE),
+    # Only the most recent N messages are sent to the API (keeps requests fast
+    # and cheap when using --continue). 0 = send everything.
+    "max_history_messages": 40
 }
 
-API_URL = (
-    "https://generativelanguage.googleapis.com"
-    "/v1beta/models/{model}:generateContent?key={key}"
+# GEMINI_API_BASE can be overridden (used for testing against a local server).
+API_BASE = os.environ.get(
+    "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 )
+TIMEOUT_SEC = 90
+RETRY_CODES = {429, 500, 502, 503, 504}
+RETRY_DELAYS = [2, 5, 10]   # seconds between attempts
 
 # ── Colors ───────────────────────────────────────────────────
 def _tty():
@@ -125,6 +132,15 @@ def save_history(history, path):
     with open(p, "w") as f:
         json.dump(history, f, indent=2)
 
+def trim_history(history, max_messages):
+    """Return the last max_messages messages, starting on a user turn."""
+    if not max_messages or len(history) <= max_messages:
+        return history
+    trimmed = history[-max_messages:]
+    while trimmed and trimmed[0]["role"] != "user":
+        trimmed = trimmed[1:]
+    return trimmed
+
 # ── Spinner ──────────────────────────────────────────────────
 class Spinner:
     def __init__(self, msg="Thinking"):
@@ -154,46 +170,94 @@ class Spinner:
         self._thread.join()
 
 # ── API call ─────────────────────────────────────────────────
+class ApiError(Exception):
+    """A failed API call. Raised (not exited) so chat mode can survive it."""
+
+def _request(url, api_key, payload=None):
+    """One HTTP call with retries on rate limits / transient server errors."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"x-goog-api-key": api_key}   # key in a header, not the URL
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        req = urllib.request.Request(url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            try:
+                msg = json.loads(body).get("error", {}).get("message", body)
+            except Exception:
+                msg = body
+            if e.code in RETRY_CODES and attempt < len(RETRY_DELAYS):
+                time.sleep(RETRY_DELAYS[attempt])
+                continue
+            hint = ""
+            if e.code == 404:
+                hint = ("\n  The model may have been retired or renamed. "
+                        "Run:  gemini_cli.py --models")
+            raise ApiError(f"API error ({e.code}): {msg}{hint}")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            reason = getattr(e, "reason", e)
+            if attempt < len(RETRY_DELAYS):
+                time.sleep(RETRY_DELAYS[attempt])
+                continue
+            raise ApiError(f"Network error: {reason}")
+
 def call_api(model, api_key, contents, system_prompt=None):
-    url     = API_URL.format(model=model, key=api_key)
+    url     = f"{API_BASE}/models/{model}:generateContent"
     payload = {"contents": contents}
     if system_prompt:
         payload["systemInstruction"] = {
             "parts": [{"text": system_prompt}]
         }
 
-    data = json.dumps(payload).encode("utf-8")
-    req  = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"}
-    )
+    with Spinner():
+        result = _request(url, api_key, payload)
 
+    block = result.get("promptFeedback", {}).get("blockReason")
+    if block:
+        raise ApiError(f"Request blocked by the API ({block}). Try rewording.")
     try:
-        with Spinner():
-            with urllib.request.urlopen(req) as resp:
-                result = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        try:
-            msg = json.loads(body).get("error", {}).get("message", body)
-        except Exception:
-            msg = body
-        err(f"API error ({e.code}): {msg}")
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        err(f"Network error: {e.reason}")
-        sys.exit(1)
-
-    try:
-        return result["candidates"][0]["content"]["parts"][0]["text"]
+        cand  = result["candidates"][0]
+        parts = cand.get("content", {}).get("parts", [])
     except (KeyError, IndexError):
-        err(f"Unexpected API response: {result}")
-        sys.exit(1)
+        raise ApiError(f"Unexpected API response: {result}")
+    text = "".join(p.get("text", "") for p in parts)
+    if not text:
+        reason = cand.get("finishReason", "unknown")
+        raise ApiError(f"Empty response (finishReason: {reason}).")
+    return text
+
+def list_models(api_key):
+    """Print the models this API key can use for chat, newest listing first."""
+    names, token = [], None
+    while True:
+        url = f"{API_BASE}/models?pageSize=200"
+        if token:
+            url += f"&pageToken={token}"
+        page = _request(url, api_key)
+        for m in page.get("models", []):
+            if "generateContent" in m.get("supportedGenerationMethods", []):
+                names.append((m["name"].split("/", 1)[-1],
+                              m.get("displayName", "")))
+        token = page.get("nextPageToken")
+        if not token:
+            break
+    return sorted(names)
 
 # ── Single question mode ─────────────────────────────────────
 def single_question(question, cfg, api_key, history, save, hist_file):
     history.append({"role": "user",  "parts": [{"text": question}]})
-    response = call_api(cfg["model"], api_key, history, cfg.get("system_prompt"))
+    try:
+        response = call_api(cfg["model"], api_key,
+                            trim_history(history, cfg.get("max_history_messages")),
+                            cfg.get("system_prompt"))
+    except ApiError as e:
+        err(str(e))
+        sys.exit(1)
     print(response)
     history.append({"role": "model", "parts": [{"text": response}]})
     if save:
@@ -244,7 +308,14 @@ def chat_mode(cfg, api_key, history, save, hist_file):
             continue
 
         history.append({"role": "user", "parts": [{"text": user_input}]})
-        response = call_api(cfg["model"], api_key, history, cfg.get("system_prompt"))
+        try:
+            response = call_api(cfg["model"], api_key,
+                                trim_history(history, cfg.get("max_history_messages")),
+                                cfg.get("system_prompt"))
+        except ApiError as e:
+            err(str(e))
+            history.pop()   # drop the unanswered question; the session continues
+            continue
         print(f"\n{CYAN}Gemini:{RESET} {response}\n")
         history.append({"role": "model", "parts": [{"text": response}]})
 
@@ -268,6 +339,7 @@ examples:
   gemini_cli.py "question" --save               save history to disk
   gemini_cli.py "question" --continue           load history, then ask
   gemini_cli.py --chat --continue --save        full persistent session
+  gemini_cli.py --models                         list models your key can use
   gemini_cli.py --config                         show config path + values
   gemini_cli.py --clear-history                  delete saved history
         """
@@ -290,6 +362,10 @@ examples:
         help="Load saved history before asking / chatting"
     )
     parser.add_argument(
+        "--models", action="store_true",
+        help="List the models your API key can use (to pick or update 'model')"
+    )
+    parser.add_argument(
         "--config", action="store_true",
         help="Show config file path and current settings"
     )
@@ -307,6 +383,7 @@ examples:
         print(f"Config file   : {CONFIG_FILE}")
         print(f"History file  : {hist_file}")
         print(f"Model         : {cfg['model']}")
+        print(f"History limit : {cfg.get('max_history_messages')} messages")
         print(f"System prompt :\n  {cfg.get('system_prompt', '(none)')}")
         return
 
@@ -325,6 +402,19 @@ examples:
 
     # ── Main flow ────────────────────────────────────────────
     api_key = load_api_key()
+
+    if args.models:
+        try:
+            models = list_models(api_key)
+        except ApiError as e:
+            err(str(e))
+            sys.exit(1)
+        for name, display in models:
+            mark = "  <- current" if name == cfg["model"] else ""
+            print(f"{name:<40} {display}{mark}")
+        info("Set your choice with:  \"model\": \"<name>\"  in " + str(CONFIG_FILE))
+        return
+
     history = load_history(hist_file) if args.cont else []
 
     if args.chat:
